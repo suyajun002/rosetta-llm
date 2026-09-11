@@ -143,6 +143,11 @@ async def handle(
 
     # Copy and rewrite the model field without mutating the caller's dict.
     upstream_body = {**payload, "model": upstream_name}
+    # Drop configured top-level fields (e.g. Claude Code's "edit" streaming
+    # hints) that the upstream provider does not support. Stripping here covers
+    # both the passthrough and translate paths, since they all forward this body.
+    for field in provider.strip_top_level_fields:
+        upstream_body.pop(field, None)
     is_stream = bool(payload.get("stream", False))
     upstream_path = _FORMAT_PATH[provider.format]
 

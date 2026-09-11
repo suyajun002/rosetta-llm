@@ -47,6 +47,7 @@ class ProviderConfig(BaseModel):
     api_key_env: str | None = None
     extra_headers: dict[str, str] = Field(default_factory=dict)
     timeout: TimeoutConfig = Field(default_factory=TimeoutConfig)
+    strip_top_level_fields: list[str] = Field(default_factory=list)
     models: list[ModelConfig | Literal["*"]] = Field(default_factory=list)
     models_ttl_seconds: int = 300
 

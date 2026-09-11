@@ -48,6 +48,12 @@
         "X-Custom": "value"
       },
 
+      // Optional: top-level request fields to drop before forwarding upstream.
+      // Use this for provider/client-only hints the upstream does not support.
+      // Example: Claude Code sends an "edit" streaming hint (e.g.
+      // clear_thinking_20251015) that deepseek/openai_responses reject with 400.
+      // "strip_top_level_fields": ["edit"],
+
       // Connection timeouts (seconds). Defaults to 30 connect / 600 read.
       "timeout": { "connect": 30, "read": 600 },
 

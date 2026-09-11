@@ -221,3 +221,56 @@ def test_chat_stream_passthrough(client: TestClient) -> None:
             chunks = b"".join(r.iter_bytes())
     assert b"[DONE]" in chunks
     assert b"hi" in chunks
+
+
+def test_strip_top_level_fields_drops_edit(client: TestClient) -> None:
+    """strip_top_level_fields=['edit'] should drop Claude Code edit hints before forwarding."""
+    import json as _json
+
+    os.environ["UP_KEY"] = "sk-up"
+    cfg = Config.model_validate(
+        {
+            "providers": {
+                "abc": {
+                    "format": "openai_chat",
+                    "base_url": "https://upstream.test/v1",
+                    "api_key_env": "UP_KEY",
+                    "strip_top_level_fields": ["edit"],
+                    "models": [{"id": "m1"}],
+                },
+            },
+        }
+    )
+    app = create_app(cfg)
+    with TestClient(app) as c:
+        with respx.mock(base_url="https://upstream.test/v1") as mock:
+            route = mock.post("/chat/completions").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "id": "x",
+                        "object": "chat.completion",
+                        "model": "m1",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "ok"},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    },
+                ),
+            )
+            r = c.post(
+                "/v1/messages",
+                json={
+                    "model": "abc/m1",
+                    "max_tokens": 16,
+                    "edit": {"type": "clear_thinking_20251015", "active": False},
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+        assert r.status_code == 200
+        sent = _json.loads(route.calls[0].request.content)
+        assert "edit" not in sent, f"edit should be stripped, got: {sent}"
