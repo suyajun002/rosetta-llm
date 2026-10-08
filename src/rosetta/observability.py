@@ -48,52 +48,6 @@ Send = Callable[[dict[str, Any]], Awaitable[None]]
 Receive = Callable[[], Awaitable[dict[str, Any]]]
 ASGIApp = Callable[[dict[str, Any], Receive, Send], Awaitable[None]]
 
-# Header values masked in debug logs so secrets never hit disk.
-_SENSITIVE_HEADERS = frozenset({"authorization", "x-api-key", "api-key", "cookie"})
-# Cap logged body size to avoid flooding logs with large payloads.
-_MAX_LOGGED_BODY = 8192
-
-
-def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
-    return {
-        k: ("***" if k in _SENSITIVE_HEADERS else v) for k, v in headers.items()
-    }
-
-
-async def _buffer_body(receive: Receive) -> tuple[bytes, Receive]:
-    """Drain the request body, then return it plus a receive() that replays it.
-
-    Buffering the full body keeps streaming intact: the wrapped receive replays
-    the captured chunks so downstream handlers read the same bytes.
-    """
-    chunks: list[bytes] = []
-    more = True
-    while more:
-        message = await receive()
-        if message["type"] != "http.request":
-            # Re-emit non-body messages (e.g. http.disconnect) verbatim.
-            replayed = [message]
-            body = b"".join(chunks)
-
-            async def _replay_other() -> dict[str, Any]:
-                return replayed.pop(0) if replayed else {"type": "http.disconnect"}
-
-            return body, _replay_other
-        chunks.append(message.get("body", b""))
-        more = message.get("more_body", False)
-
-    body = b"".join(chunks)
-    sent = False
-
-    async def _replay() -> dict[str, Any]:
-        nonlocal sent
-        if not sent:
-            sent = True
-            return {"type": "http.request", "body": body, "more_body": False}
-        return {"type": "http.disconnect"}
-
-    return body, _replay
-
 
 class RequestContextMiddleware:
     """Pure ASGI middleware that sets a request_id contextvar and echoes the header."""
@@ -117,13 +71,10 @@ class RequestContextMiddleware:
 
         log = get_logger()
         if log.is_enabled_for(logging.DEBUG):
-            body, receive = await _buffer_body(receive)
             log.debug(
                 "request_received",
-                headers=_redact_headers(headers),
-                query=scope.get("query_string", b"").decode(),
-                body=body[:_MAX_LOGGED_BODY].decode("utf-8", "replace"),
-                body_bytes=len(body),
+                content_type=headers.get("content-type", ""),
+                content_length=headers.get("content-length", ""),
             )
 
         async def send_wrapper(message: dict[str, Any]) -> None:

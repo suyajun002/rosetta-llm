@@ -28,6 +28,7 @@ async def parse(chunks: AsyncIterator[bytes]) -> AsyncIterator[CanonicalStreamEv
     buffer = b""
     current_item_index = -1
     ws_counters: dict[int, int] = {}
+    saw_tool_call = False
     started = False
     stopped = False
     started_parts: set[int] = set()
@@ -66,6 +67,7 @@ async def parse(chunks: AsyncIterator[bytes]) -> AsyncIterator[CanonicalStreamEv
                     started_parts.clear()
                     stopped_parts.clear()
                     resp = data.get("response", {}) or {}
+                    saw_tool_call = False
                     yield with_raw(MessageStartEvent(model=resp.get("model", "")), data)
 
                 elif evt_type == "response.output_item.added":
@@ -80,6 +82,7 @@ async def parse(chunks: AsyncIterator[bytes]) -> AsyncIterator[CanonicalStreamEv
                             PartStartEvent(index=current_item_index, part_type="text"), data
                         )
                     elif item_type == "function_call":
+                        saw_tool_call = True
                         ws_counters[current_item_index] = 0
                         yield with_raw(
                             PartStartEvent(
@@ -169,7 +172,7 @@ async def parse(chunks: AsyncIterator[bytes]) -> AsyncIterator[CanonicalStreamEv
                     out_details = usage_data.get("output_tokens_details", {}) or {}
                     incomplete_reason = (resp.get("incomplete_details") or {}).get("reason") or ""
                     if evt_type == "response.completed":
-                        normalized = "end_turn"
+                        normalized = "tool_use" if saw_tool_call else "end_turn"
                     elif incomplete_reason == "max_output_tokens":
                         normalized = "max_tokens"
                     else:

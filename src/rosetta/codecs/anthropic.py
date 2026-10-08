@@ -46,6 +46,7 @@ _REQUEST_TOP_LEVEL_KEYS = frozenset(
         "output_config",
         "stream",
         "metadata",
+        "edit",
     }
 )
 

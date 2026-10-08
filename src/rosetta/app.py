@@ -8,8 +8,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from rosetta.auth import AuthMiddleware
+from rosetta.build_info import load_build_info
 from rosetta.config import Config
-from rosetta.observability import RequestContextMiddleware
+from rosetta.observability import RequestContextMiddleware, get_logger
 from rosetta.routes.chat_completions import router as chat_router
 from rosetta.routes.health import router as health_router
 from rosetta.routes.messages import router as messages_router
@@ -36,6 +37,7 @@ async def _models_refresh_loop(app: FastAPI, interval: float) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    get_logger().info("rosetta_starting", **app.state.build_info.log_fields())
     app.state.upstream = UpstreamClient(app.state.config.providers)
     await app.state.upstream.start()
 
@@ -61,6 +63,7 @@ def create_app(config: Config) -> FastAPI:
     app.state.provider_status = {}
     app.state.model_snapshot = {}
     app.state.model_refresh_lock = asyncio.Lock()
+    app.state.build_info = load_build_info()
 
     app.add_middleware(AuthMiddleware)
     app.add_middleware(RequestContextMiddleware)

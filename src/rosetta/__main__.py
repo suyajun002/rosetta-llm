@@ -9,6 +9,7 @@ from pathlib import Path
 import uvicorn
 
 from rosetta.app import create_app
+from rosetta.build_info import load_build_info
 from rosetta.config import load_config
 from rosetta.observability import setup_logging
 
@@ -16,10 +17,12 @@ DEFAULT_CONFIG = str(Path.home() / ".rosetta-llm" / "config.json")
 
 
 def main() -> None:
+    build_info = load_build_info()
     parser = argparse.ArgumentParser(
         prog="rosetta-llm",
         description="Multi-format bidirectional LLM proxy",
     )
+    parser.add_argument("--version", action="version", version=build_info.display())
     parser.add_argument(
         "--config",
         "-c",

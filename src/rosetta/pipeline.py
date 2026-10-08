@@ -17,6 +17,7 @@ Translation invariants:
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -26,7 +27,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from rosetta.codecs import anthropic as ac_codec
 from rosetta.codecs import openai_chat as oc_codec
 from rosetta.codecs import openai_responses as or_codec
-from rosetta.config import Config, ProviderConfig
+from rosetta.config import Config, ProviderConfig, ReasoningEffort
 from rosetta.errors import format_error, format_stream_error
 from rosetta.ir.request import CanonicalRequest
 from rosetta.ir.response import CanonicalResponse
@@ -99,7 +100,15 @@ def _forwarded_headers(request: Request) -> dict[str, str]:
 _CLAUDE_CODE_GW_PREFIX = "claude-code/"
 
 
-def _resolve_model(model_id: str, config: Config) -> tuple[ProviderConfig, str, str]:
+@dataclass(frozen=True, slots=True)
+class ResolvedModel:
+    provider: ProviderConfig
+    provider_key: str
+    upstream_name: str
+    model_reasoning_effort: ReasoningEffort | None
+
+
+def _resolve_model(model_id: str, config: Config) -> ResolvedModel:
     # Claude Code gateway prefix: strip and re-resolve the underlying provider/model.
     if model_id.startswith(_CLAUDE_CODE_GW_PREFIX):
         inner = model_id[len(_CLAUDE_CODE_GW_PREFIX) :]
@@ -113,11 +122,42 @@ def _resolve_model(model_id: str, config: Config) -> tuple[ProviderConfig, str, 
     if provider is None:
         raise ValueError(f"Unknown provider '{provider_key}'")
     upstream_name = model_name
+    model_reasoning_effort = None
     for m in provider.static_models:
         if m.id == model_name:
             upstream_name = m.effective_upstream_name
+            model_reasoning_effort = m.reasoning_effort
             break
-    return provider, provider_key, upstream_name
+    return ResolvedModel(
+        provider=provider,
+        provider_key=provider_key,
+        upstream_name=upstream_name,
+        model_reasoning_effort=model_reasoning_effort,
+    )
+
+
+def _apply_responses_options(body: dict[str, Any], resolved: ResolvedModel) -> None:
+    """Apply provider defaults and explicit model-profile overrides."""
+    if resolved.provider.format != "openai_responses":
+        return
+
+    prompt_cache_key = resolved.provider.responses_prompt_cache_key
+    if prompt_cache_key:
+        body.setdefault("prompt_cache_key", prompt_cache_key)
+
+    configured_effort = resolved.model_reasoning_effort
+    default_effort = resolved.provider.responses_reasoning_effort
+    if configured_effort is None and default_effort is None:
+        return
+
+    reasoning = body.get("reasoning")
+    if not isinstance(reasoning, dict):
+        reasoning = {}
+        body["reasoning"] = reasoning
+    if configured_effort is not None:
+        reasoning["effort"] = configured_effort
+    else:
+        reasoning.setdefault("effort", default_effort)
 
 
 async def handle(
@@ -132,23 +172,32 @@ async def handle(
 
     model_id = payload.get("model", "")
     try:
-        provider, provider_key, upstream_name = _resolve_model(model_id, config)
+        resolved = _resolve_model(model_id, config)
     except ValueError as e:
         return JSONResponse(
             content=format_error(inbound_format, 400, "invalid_request_error", str(e)),
             status_code=400,
         )
 
+    provider = resolved.provider
+    provider_key = resolved.provider_key
     bind_request_context(provider=provider_key, model=model_id, format=provider.format)
 
     # Copy and rewrite the model field without mutating the caller's dict.
-    upstream_body = {**payload, "model": upstream_name}
+    upstream_body = {**payload, "model": resolved.upstream_name}
+    # Claude Code streaming edit (e.g. clear_thinking_20251015) is an Anthropic-side
+    # context-management hint that deepseek/openai_responses upstreams do not support.
+    # Drop configured top-level fields (e.g. "edit", "context_management") so they are
+    # never forwarded verbatim (covers translate and passthrough).
+    for field in provider.strip_top_level_fields:
+        upstream_body.pop(field, None)
     is_stream = bool(payload.get("stream", False))
     upstream_path = _FORMAT_PATH[provider.format]
 
     fwd_headers = _forwarded_headers(request)
 
     if inbound_format == provider.format:
+        _apply_responses_options(upstream_body, resolved)
         return await _passthrough(
             provider_key,
             upstream_path,
@@ -174,6 +223,7 @@ async def handle(
         log,
         fwd_headers,
         status_dict,
+        resolved,
     )
 
 
@@ -250,6 +300,7 @@ async def _translate(
     log: Any,
     fwd_headers: dict[str, str],
     status_dict: dict[str, Any],
+    resolved: ResolvedModel,
 ) -> Response:
     log.info(
         "translate", inbound=inbound_format, provider_format=provider_format, stream=is_stream
@@ -258,6 +309,13 @@ async def _translate(
     try:
         ir = _PARSE_REQ[inbound_format](payload)
         upstream_body = _RENDER_REQ[provider_format](ir)
+        # Drop Claude Code streaming-edit hints (e.g. clear_thinking_20251015).
+        # render_request can re-insert 'edit'/'context_management' from raw_extras,
+        # so strip configured fields here (after render) so they are never forwarded
+        # to an unsupporting upstream.
+        for field in resolved.provider.strip_top_level_fields:
+            upstream_body.pop(field, None)
+        _apply_responses_options(upstream_body, resolved)
     except Exception as e:  # noqa: BLE001
         log.error("translate_request_error", error=str(e))
         return JSONResponse(

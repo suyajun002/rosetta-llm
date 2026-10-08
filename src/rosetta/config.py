@@ -10,11 +10,26 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field, model_validator
 
 Format = Literal["openai_chat", "openai_responses", "anthropic"]
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+_REASONING_EFFORT_VALUES = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+
+
+def _optional_env(name: str) -> str | None:
+    return os.environ.get(name) or None
+
+
+def _reasoning_effort_env() -> ReasoningEffort | None:
+    value = _optional_env("ROSETTA_RESPONSES_REASONING_EFFORT")
+    if value is None:
+        return None
+    if value not in _REASONING_EFFORT_VALUES:
+        raise ValueError("ROSETTA_RESPONSES_REASONING_EFFORT has an unsupported value")
+    return cast(ReasoningEffort, value)
 
 
 class Capabilities(BaseModel):
@@ -27,6 +42,7 @@ class Capabilities(BaseModel):
 class ModelConfig(BaseModel):
     id: str
     upstream_name: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
     supports: Capabilities = Field(default_factory=Capabilities)
     thinking_budget_default: int = 12288
 
@@ -49,6 +65,13 @@ class ProviderConfig(BaseModel):
     timeout: TimeoutConfig = Field(default_factory=TimeoutConfig)
     models: list[ModelConfig | Literal["*"]] = Field(default_factory=list)
     models_ttl_seconds: int = 300
+    strip_top_level_fields: list[str] = Field(default_factory=list)
+    responses_prompt_cache_key: str | None = Field(
+        default_factory=lambda: _optional_env("ROSETTA_RESPONSES_PROMPT_CACHE_KEY")
+    )
+    responses_reasoning_effort: ReasoningEffort | None = Field(
+        default_factory=_reasoning_effort_env
+    )
 
     @model_validator(mode="after")
     def resolve_api_key(self) -> ProviderConfig:
