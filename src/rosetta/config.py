@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field, model_validator
 Format = Literal["openai_chat", "openai_responses", "anthropic"]
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 _REASONING_EFFORT_VALUES = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+DEFAULT_MAX_TOOL_ARG_WHITESPACE_RUN = 2000
+MAX_TOOL_ARG_WHITESPACE_RUN_ENV = "ROSETTA_MAX_TOOL_ARG_WHITESPACE_RUN"
 
 
 def _optional_env(name: str) -> str | None:
@@ -30,6 +32,30 @@ def _reasoning_effort_env() -> ReasoningEffort | None:
     if value not in _REASONING_EFFORT_VALUES:
         raise ValueError("ROSETTA_RESPONSES_REASONING_EFFORT has an unsupported value")
     return cast(ReasoningEffort, value)
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    value = _optional_env(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer") from None
+    if parsed <= 0:
+        raise ValueError(f"{name} must be positive")
+    return parsed
+
+
+def max_tool_arg_whitespace_run() -> int:
+    """Whitespace-only tool-argument deltas tolerated before a stream is aborted.
+
+    The guard exists to stop a model that runs away emitting whitespace inside a
+    streamed tool call. Indented multi-line tool arguments legitimately contain
+    long whitespace runs, so the limit stays far above real indentation and is
+    operator-configurable.
+    """
+    return _positive_int_env(MAX_TOOL_ARG_WHITESPACE_RUN_ENV, DEFAULT_MAX_TOOL_ARG_WHITESPACE_RUN)
 
 
 class Capabilities(BaseModel):

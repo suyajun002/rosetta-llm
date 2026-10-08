@@ -7,6 +7,7 @@ from typing import Any
 
 import orjson
 
+from rosetta.config import max_tool_arg_whitespace_run
 from rosetta.ir.events import (
     CanonicalStreamEvent,
     ErrorEvent,
@@ -19,8 +20,7 @@ from rosetta.ir.events import (
 )
 from rosetta.ir.helpers import with_raw
 from rosetta.ir.response import StopInfo, Usage
-
-MAX_WHITESPACE_RUN = 20
+from rosetta.observability import get_logger
 
 
 async def parse(chunks: AsyncIterator[bytes]) -> AsyncIterator[CanonicalStreamEvent]:
@@ -28,6 +28,9 @@ async def parse(chunks: AsyncIterator[bytes]) -> AsyncIterator[CanonicalStreamEv
     buffer = b""
     current_item_index = -1
     ws_counters: dict[int, int] = {}
+    ws_tripped: set[int] = set()
+    whitespace_limit = max_tool_arg_whitespace_run()
+    log = get_logger()
     saw_tool_call = False
     started = False
     stopped = False
@@ -141,10 +144,20 @@ async def parse(chunks: AsyncIterator[bytes]) -> AsyncIterator[CanonicalStreamEv
                         continue
                     if delta_text.strip() == "":
                         ws_counters[idx] = ws_counters.get(idx, 0) + len(delta_text)
-                        if ws_counters[idx] > MAX_WHITESPACE_RUN:
+                        if idx in ws_tripped:
+                            continue
+                        if ws_counters[idx] > whitespace_limit:
+                            ws_tripped.add(idx)
+                            log.warning(
+                                "tool_arg_whitespace_runaway",
+                                item_index=idx,
+                                whitespace_chars=ws_counters[idx],
+                                limit=whitespace_limit,
+                                delta_sample=repr(delta_text[:64]),
+                            )
                             yield with_raw(
                                 ErrorEvent(
-                                    error_type="invalid_request_error",
+                                    error_type="translation_error",
                                     message="Runaway whitespace in tool call arguments",
                                 ),
                                 data,
