@@ -255,10 +255,16 @@ async def _passthrough(
         )
         record_provider_status(status_dict, provider_key, ok=resp.is_success)
     except httpx.HTTPError as e:
-        log.error("upstream_error", error=str(e))
+        log.error(
+            "upstream_error",
+            error_type=type(e).__name__,
+            error=_upstream_error_message(e),
+        )
         record_provider_status(status_dict, provider_key, ok=False)
         return JSONResponse(
-            content=format_error(inbound_format, 502, "upstream_error", str(e)),
+            content=format_error(
+                inbound_format, 502, "upstream_error", _upstream_error_message(e)
+            ),
             status_code=502,
         )
     return Response(
@@ -266,6 +272,46 @@ async def _passthrough(
         status_code=resp.status_code,
         media_type=resp.headers.get("content-type", "application/json"),
     )
+
+
+def _upstream_error_message(exc: Exception) -> str:
+    """Diagnostic text for an httpx transport error.
+
+    httpx builds several transport errors with an empty ``str()`` (``PoolTimeout``
+    and friends), so those reached clients as
+    ``{"type":"error","error":{"type":"upstream_error","message":""}}`` and could
+    not be told apart from an upstream bug. Always return a non-empty reason.
+    """
+    message = str(exc).strip()
+    if message:
+        return message
+    if isinstance(exc, httpx.PoolTimeout):
+        return (
+            "upstream connection pool exhausted: every connection of this provider "
+            "is still held by an abandoned stream, so the request was never sent"
+        )
+    return f"{type(exc).__name__}: upstream request failed before any response"
+
+
+async def _close_open_streams(open_streams: list[AsyncIterator[Any]]) -> None:
+    """Close tracked upstream iterators, newest first.
+
+    An abandoned async generator keeps its httpx connection - and with it a slot of
+    the provider's connection pool - until the event loop finalizes the generator,
+    which can be arbitrarily late. Closing explicitly is what stops a client
+    disconnect from permanently eating pool capacity.
+    """
+    log = get_logger()
+    while open_streams:
+        stream = open_streams.pop()
+        aclose = getattr(stream, "aclose", None)
+        if aclose is None:
+            continue
+        try:
+            await aclose()
+        except (RuntimeError, StopAsyncIteration) as exc:
+            # Already closed, or still driven by wrap_with_ping's producer task.
+            log.debug("stream_aclose_skipped", error_type=type(exc).__name__)
 
 
 async def _passthrough_stream_with_recovery(
@@ -283,9 +329,15 @@ async def _passthrough_stream_with_recovery(
             yield chunk
         record_provider_status(status_dict, provider_key, ok=True)
     except httpx.HTTPError as e:
-        log.error("stream_upstream_error", error=str(e))
+        log.error(
+            "stream_upstream_error",
+            error_type=type(e).__name__,
+            error=_upstream_error_message(e),
+        )
         record_provider_status(status_dict, provider_key, ok=False)
-        yield format_stream_error(inbound_format, "upstream_error", str(e))
+        yield format_stream_error(inbound_format, "upstream_error", _upstream_error_message(e))
+    finally:
+        await _close_open_streams([gen])
 
 
 async def _translate(
@@ -345,10 +397,16 @@ async def _translate(
             provider_key, upstream_path, upstream_body, extra_headers=fwd_headers
         )
     except httpx.HTTPError as e:
-        log.error("upstream_error", error=str(e))
+        log.error(
+            "upstream_error",
+            error_type=type(e).__name__,
+            error=_upstream_error_message(e),
+        )
         record_provider_status(status_dict, provider_key, ok=False)
         return JSONResponse(
-            content=format_error(inbound_format, 502, "upstream_error", str(e)),
+            content=format_error(
+                inbound_format, 502, "upstream_error", _upstream_error_message(e)
+            ),
             status_code=502,
         )
 
@@ -394,14 +452,19 @@ async def _translate_stream(
     status_dict: dict[str, Any],
 ) -> AsyncIterator[bytes]:
     log = get_logger()
+    open_streams: list[AsyncIterator[Any]] = []
     try:
         upstream_bytes = upstream.stream(
             provider_key, upstream_path, payload, extra_headers=fwd_headers
         )
+        open_streams.append(upstream_bytes)
         ir_events = _STREAM_PARSE[provider_format](upstream_bytes)
+        open_streams.append(ir_events)
         if inbound_format == "anthropic":
             ir_events = ac_stream.wrap_with_ping(ir_events)
+            open_streams.append(ir_events)
         out_bytes = _STREAM_RENDER[inbound_format](ir_events)
+        open_streams.append(out_bytes)
 
         async for chunk in out_bytes:
             if await request.is_disconnected():
@@ -409,12 +472,18 @@ async def _translate_stream(
             yield chunk
         record_provider_status(status_dict, provider_key, ok=True)
     except httpx.HTTPError as e:
-        log.error("stream_upstream_error", error=str(e))
+        log.error(
+            "stream_upstream_error",
+            error_type=type(e).__name__,
+            error=_upstream_error_message(e),
+        )
         record_provider_status(status_dict, provider_key, ok=False)
-        yield format_stream_error(inbound_format, "upstream_error", str(e))
+        yield format_stream_error(inbound_format, "upstream_error", _upstream_error_message(e))
     except Exception as e:  # noqa: BLE001
         log.exception("stream_translate_error")
         yield format_stream_error(inbound_format, "translation_error", str(e))
+    finally:
+        await _close_open_streams(open_streams)
 
 
 def _extract_error_message(payload: Any) -> str:
