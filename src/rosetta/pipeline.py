@@ -29,6 +29,7 @@ from rosetta.codecs import openai_chat as oc_codec
 from rosetta.codecs import openai_responses as or_codec
 from rosetta.config import Config, ProviderConfig, ReasoningEffort
 from rosetta.errors import format_error, format_stream_error
+from rosetta.input_budget import fit_input_items
 from rosetta.ir.request import CanonicalRequest
 from rosetta.ir.response import CanonicalResponse
 from rosetta.observability import bind_request_context, get_logger
@@ -140,6 +141,19 @@ def _apply_responses_options(body: dict[str, Any], resolved: ResolvedModel) -> N
     """Apply provider defaults and explicit model-profile overrides."""
     if resolved.provider.format != "openai_responses":
         return
+
+    input_limit = resolved.provider.max_input_items
+    upstream_input = body.get("input")
+    if input_limit and isinstance(upstream_input, list):
+        fitted, dropped = fit_input_items(upstream_input, input_limit)
+        if dropped:
+            body["input"] = fitted
+            get_logger().warning(
+                "input_items_trimmed",
+                dropped=dropped,
+                kept=len(fitted),
+                limit=input_limit,
+            )
 
     prompt_cache_key = resolved.provider.responses_prompt_cache_key
     if prompt_cache_key:

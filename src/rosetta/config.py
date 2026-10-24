@@ -92,6 +92,7 @@ class ProviderConfig(BaseModel):
     models: list[ModelConfig | Literal["*"]] = Field(default_factory=list)
     models_ttl_seconds: int = 300
     strip_top_level_fields: list[str] = Field(default_factory=list)
+    max_input_items: int | None = None
     responses_prompt_cache_key: str | None = Field(
         default_factory=lambda: _optional_env("ROSETTA_RESPONSES_PROMPT_CACHE_KEY")
     )

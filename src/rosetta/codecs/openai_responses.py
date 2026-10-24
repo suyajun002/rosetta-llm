@@ -53,6 +53,25 @@ _REQUEST_TOP_LEVEL_KEYS = frozenset(
     }
 )
 
+# Top-level fields that may be forwarded untouched when the inbound request was
+# already a Responses request. Inbound requests from another protocol (Anthropic
+# via Claude Code) carry their own top-level fields in ``raw_extras``; those are
+# not valid here and an upstream will reject the whole request with
+# ``json: unknown field "..."`` for the first one it does not know. Only the
+# keys below are known-safe Responses parameters, so everything else is dropped.
+_RESPONSES_OPTIONAL_KEYS = frozenset(
+    {
+        "truncation",
+        "text",
+        "prompt_cache_retention",
+        "background",
+        "max_tool_calls",
+        "safety_identifier",
+        "conversation",
+        "top_logprobs",
+    }
+)
+
 
 def _parse_reasoning_item(item: dict[str, Any]) -> Message:
     encrypted = item.get("encrypted_content", "") or ""
@@ -394,7 +413,8 @@ def render_request(ir: CanonicalRequest) -> dict[str, Any]:
         body["stream"] = True
 
     for k, v in ir.raw_extras.items():
-        body.setdefault(k, v)
+        if k in _RESPONSES_OPTIONAL_KEYS:
+            body.setdefault(k, v)
 
     return body
 
